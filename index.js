@@ -3,62 +3,139 @@ const app = express()
 app.use(express.urlencoded());
 
 const mongoose = require('mongoose');
-mongoose.connect('mongodb://localhost/test', {useNewUrlParser: true, useUnifiedTopology: true});
+mongoose.connect('mongodb://localhost/test', {useNewUrlParser: true, useUnifiedTopology: true, useCreateIndex: true});
+
+const port = 3000;
+
+const countrySchema = new mongoose.Schema({
+    english: {
+        type: String,
+        required: true
+    },
+    portuguese: {
+        type: String,
+        required: true
+    }
+});
+
+countrySchema.main = 'english';
 
 // forbid incomplete
 const snakeSchema = new mongoose.Schema({
     binomial: {
         type: String,
-        unique: true
+        unique: true,
+        required: true
     },
-    popular: String,
-    venomous: Boolean
+    popular: {
+        type: String,
+        required: true
+    },
+    venomous: {
+        type: Boolean,
+        required: true
+    }, 
+    region: {
+        type: countrySchema,
+        required: true
+    }
+});
+
+snakeSchema.main = 'binomial';
+
+const schemas = [countrySchema, snakeSchema];
+
+schemas.forEach(schema => {
+    schema.method('toHTML', function() {
+        let html = Object.keys(this.schema.paths)
+            .filter(path => path[0] !== '_')
+            .map(path => {
+                console.log(52, typeof this[path], this[path]);
+                if (typeof this[path] === 'object') {
+                    return `<div><span>${path} (schema):</span><div>${this[path].toHTML()}</div></div>`;
+                } else {
+                    return `<div><span>${path}:</span><input value='${this[path]}' readonly/></div>`;
+                }
+            })
+            .join('<br>\n');
+        html = `<div style='padding: 10px; display: inline-block; border: 1px solid black;'>${html}</div>`;
+        return html;
+    });
 });
 
 const Snake = mongoose.model('Snake', snakeSchema);
+Snake.endpoint = 'snakes';
 
-Snake.validate();
+const Country = mongoose.model('Country', countrySchema);
+Country.endpoint = 'countries';
 
-const port = 3000;
+const models = [Snake, Country];
 
-app.get('/:id?', (req, res) => {
-    const { id } = req.params;
-    Snake.find(id ? { _id: id } : {}).exec(function(err, res2) { // django does provide an automatic id field, but you may access it without underscore
-        res.json(res2);
-    });
-});
-
-app.get('/:id/first', (req, res) => {
-    const { id } = req.params;
-    Snake.findOne({ _id: id }).exec(function(err, res2) { // django does provide an automatic id field, but you may access it without underscore
-        res.json(res2);
-    });
-});
-
-
-
-app.post('/', (req, res) => {
-    const newSnake = new Snake(req.body);
-    newSnake.save(err => {
-        if (err) {
-            res.send('error when saving' + err);
+app.get('/:model?/:id?', (req, res) => {
+    const { model, id } = req.params;
+    if (model) {
+        modelFound = models.find(m => m.endpoint === model);
+        if (modelFound) {
+            if (id) {
+                modelFound.findOne({_id: id}).exec(function(err, result) {
+                    res.send(result.toHTML());
+                });
+            } else {
+                modelFound.find({}).exec(function(err, results) {
+                    res.send(results.map(result => {
+                        return `<a href='/${modelFound.endpoint}/${result._id}'>${result[result.schema.main]}</a>`;
+                    }).join('<br>\n'));
+                });
+            }
         } else {
-            res.send(`New snake: ${newSnake.binomial} a.k.a. ${newSnake.popular}. Dangerous? ${newSnake.venomous ? 'Yes' : 'No'}.`);
+            res.send('Model not found.');
         }
-    });
+    } else {
+        const html = models.map(m => `<a href='/${m.endpoint}'>${m.modelName}</a>`).join('<br>\n');
+        res.send(html);
+    }
 });
-// curl -X POST --data "binomial=Boa constrictor&popular=jiboia-constritora&venomous=false" http://localhost:3000
-// curl -X POST --data "binomial=Bothrops jararaca&popular=jararaca-da-mata&venomous=true" http://localhost:3000
-// curl -X POST --data "binomial=Crotalus durissus&popular=cascavel&venomous=true" http://localhost:3000
-// curl -X POST --data "binomial=Eunectes murinus&popular=sucuri-verde&venomous=false" http://localhost:3000
 
+app.post('/:model', async (req, res) => {
+    const { model } = req.params;
 
+    switch(model) {
+        case 'snakes':
+            const newSnake = new Snake(req.body);
+            newSnake.region = await Country.findOne({english: req.body.region});
+            newSnake.save(err => {
+                if (err) {
+                    res.send('error when saving' + err);
+                } else {
+                    res.send(`New snake: ${newSnake.binomial} a.k.a. ${newSnake.popular}, from ${newSnake.region.english}. Dangerous? ${newSnake.venomous ? 'Yes' : 'No'}.`);
+                }
+            });
+            break;
+        case 'countries':
+            const newCountry = new Country(req.body);
+            newCountry.save(err => {
+                if (err) {
+                    res.send('error when saving' + err);
+                } else {
+                    res.send(`New country: ${newCountry.english} (${newCountry.portuguese}).`)
+                }
+            })
+            break;
+        default:
+            break;
+    }
+});
 
+// Delete all documents and says how many have been removed, for each model
 app.delete('/', (req, res) => {
-    Snake.deleteMany({}, function (error, mongooseDeleteResult){
-        res.send('Snakes killed: ' + mongooseDeleteResult.deletedCount);
+    Promise.all(models.map(model => model.deleteMany({})))
+    .then(values => {
+        const message = values.map((value, index) => 
+        `${models[index].modelName}s removed: ${value.deletedCount}`).join('\n');
+        res.send(message);
     });
 });
+
 // curl -X DELETE http://localhost:3000
 
 app.listen(port, () => {
